@@ -6,20 +6,12 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote, urlsplit
 
 from .github import GitHubClient, GitHubError, InputLimit, positive_id, repo_segment, revision_sha, url_path
+from .report import MARKER, line_in_patch, review_markdown
 
-MARKER = "<!-- architecture-review-benchmark:v1 -->"
-STATUS_TITLES = {
-    "violation": "Architecture violation detected",
-    "clean": "No new architecture violation in the evaluated scope",
-    "unsupported": "Architecture review unavailable for this revision",
-    "error": "Architecture review failed for this revision",
-}
+REVIEW_STATUSES = {"violation", "clean", "unsupported", "error"}
 FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
-MAX_COMMENT_FINDINGS = 20
-MAX_COMMENT_BYTES = 50_000
 REVIEW_COVERAGE = {"complete_scoped", "partial", "unsupported", "unknown"}
 FORMAL_SCOPE = "Direct dependency declarations in changed package.json files under configured repository paths."
 SOURCE_DIAGNOSTICS = {
@@ -29,6 +21,7 @@ SOURCE_DIAGNOSTICS = {
     "bundledDependencies": "bundled_dependencies",
     "source-role-unknown": "source_role_unknown",
     "npm-alias": "npm_alias",
+    "baseline_edge_unresolved": "baseline_edge_unresolved",
 }
 KNOWN_DIAGNOSTIC_PREFIXES = {
     "No formal policy is configured": "policy_repository_unsupported",
@@ -39,6 +32,8 @@ KNOWN_DIAGNOSTIC_PREFIXES = {
     "Combined package data exceed": "manifest_size_limit",
     "Base architecture document does not contain": "base_rule_anchors_missing",
     "AACT processing timed out": "reviewer_timeout",
+    "AACT model projection failed": "manifest_projection_failed",
+    "AACT engine is missing": "engine_missing",
 }
 
 
@@ -101,95 +96,8 @@ def _current(api: GitHubClient, context: PullRequestContext) -> dict | None:
     return pr
 
 
-def _safe_inline(value: str, limit: int) -> str:
-    # Everything from a finding is text, including package names or file paths
-    # from the PR. Quotes and separators cannot open another Markdown segment.
-    value = "".join(c for c in str(value)[:limit] if c.isprintable())
-    return value.replace("`", "'").replace("@", "＠").replace("<", "‹").replace(">", "›")
-
-
-def _allowed_source(source: str, context: PullRequestContext) -> str | None:
-    # URLs are constructed here from the trusted repo and reviewed base only.
-    prefix = f"/{context.repository}/blob/{context.review_base_sha}/"
-    if "://" in source:
-        try:
-            parsed = urlsplit(source)
-            if (
-                parsed.scheme != "https"
-                or parsed.netloc != "github.com"
-                or parsed.query
-                or not parsed.path.startswith(prefix)
-            ):
-                return None
-            path = unquote(parsed.path[len(prefix):], errors="strict")
-        except (ValueError, UnicodeError):
-            return None
-        sep, fragment = bool(parsed.fragment), parsed.fragment
-    else:
-        path, sep, fragment = source.partition("#")
-    if sep and not re.fullmatch(r"L[1-9][0-9]*(?:-L[1-9][0-9]*)?", fragment):
-        return None
-    try:
-        safe_path = url_path(path)
-    except ValueError:
-        return None
-    return f"https://github.com{prefix}{safe_path}" + (
-        "#" + fragment if sep else ""
-    )
-
-
-def _comment_body(context: PullRequestContext, result: dict) -> str:
-    status = result["status"]
-    body = [
-        MARKER,
-        f"### {STATUS_TITLES[status]}",
-        "",
-        f"Base `{context.review_base_sha[:12]}` · Head `{context.head_sha[:12]}`",
-        "",
-    ]
-    if status == "clean":
-        body.append("AACT reported no new findings in the configured policies for these revisions.")
-    elif status in {"unsupported", "error"}:
-        body.append("The previous review is superseded. See the workflow log for the current status.")
-    else:
-        if result.get("coverage") == "partial":
-            body.extend(["AACT reported partial coverage. Additional dependencies may require review.", ""])
-        findings = sorted(
-            result["findings"],
-            key=lambda f: tuple(str(f.get(k, "")) for k in ("file", "line", "rule", "problem")),
-        )
-        shown = 0
-        for n, finding in enumerate(findings[:MAX_COMMENT_FINDINGS], 1):
-            rule = _safe_inline(finding["rule"], 250)
-            location = _safe_inline(finding["file"], 550)
-            line = finding.get("line")
-            if isinstance(line, int) and not isinstance(line, bool) and 0 < line <= 1_000_000:
-                location += f":{line}"
-            problem = _safe_inline(finding["problem"], 750)
-            recommendation = _safe_inline(finding["recommendation"], 700)
-            source = _safe_inline(finding["source"], 550)
-            url = _allowed_source(finding["source"], context)
-            link = f" [Pinned base document]({url})" if url else ""
-            part = [
-                f"**{n}.** `{rule}` · `{location}`",
-                "",
-                f"- Problem · `{problem}`",
-                f"- Recommendation · `{recommendation}`",
-                f"- Source · `{source}`{link}",
-                "",
-            ]
-            if len("\n".join(body + part).encode("utf-8")) > MAX_COMMENT_BYTES - 512:
-                break
-            body.extend(part)
-            shown += 1
-        if shown != len(findings):
-            body.append(f"{len(findings) - shown} additional findings are omitted from this comment.")
-        body.append("This comment is advisory and applies to the configured policy scope.")
-    return "\n".join(body) + "\n"
-
-
 def _review_result(value: dict) -> dict:
-    if not isinstance(value, dict) or value.get("status") not in STATUS_TITLES:
+    if not isinstance(value, dict) or value.get("status") not in REVIEW_STATUSES:
         return {"status": "error", "findings": [], "reason": "invalid_reviewer_result"}
     findings = value.get("findings", [])
     if (
@@ -227,9 +135,9 @@ def _review_result(value: dict) -> dict:
     }
 
 
-def _comment_write(operation, *args) -> None:
+def _comment_write(operation, *args):
     try:
-        operation(*args)
+        return operation(*args)
     except GitHubError as exc:
         uncertain = exc.code in ("github_transport_or_timeout", "github_invalid_json") or (
             exc.status is not None and (exc.status >= 500 or exc.status == 408)
@@ -240,7 +148,9 @@ def _comment_write(operation, *args) -> None:
         raise CommentDeliveryError("comment_response_limit", uncertain=True) from None
 
 
-def _manage_comment(api: GitHubClient, context: PullRequestContext, result: dict) -> str:
+def _manage_comment(
+    api: GitHubClient, context: PullRequestContext, result: dict, run_id: int | None
+) -> tuple[str, int | None]:
     existing = []
     for comment in api.comments(context.repository, context.number, context.repository_id):
         user = comment.get("user")
@@ -254,25 +164,26 @@ def _manage_comment(api: GitHubClient, context: PullRequestContext, result: dict
         ):
             existing.append(comment)
     if not existing and result["status"] != "violation":
-        return "none"
+        return "none", None
     # A newer PR event may have arrived while reading the inputs or comments.
     # GitHub doesn't offer a compare-and-swap endpoint for issue comments.
     if _current(api, context) is None:
-        return "superseded"
-    body = _comment_body(context, result)
+        return "superseded", None
+    body = review_markdown(result, run_id=run_id, comment=True)
     if not existing:
-        _comment_write(api.create_comment, context.repository, context.number, body)
-        return "created"
+        comment_id = _comment_write(api.create_comment, context.repository, context.number, body)
+        return "created", comment_id
     managed = min(existing, key=lambda comment: positive_id(comment["id"]))
+    comment_id = managed["id"]
     if managed["body"] == body:
-        return "unchanged"
-    _comment_write(api.edit_comment, context.repository, managed["id"], body)
-    return "updated"
+        return "unchanged", comment_id
+    _comment_write(api.edit_comment, context.repository, comment_id, body)
+    return "updated", comment_id
 
 
 def _files(
     api: GitHubClient, context: PullRequestContext, pr: dict, max_files: int, max_patch_bytes: int
-) -> list[dict]:
+) -> tuple[list[dict], dict[str, str]]:
     total = pr.get("changed_files")
     if type(total) is not int or total < 0:
         raise GitHubError("github_missing_file_count")
@@ -282,6 +193,7 @@ def _files(
     if len(all_files) != total:
         raise GitHubError("github_incomplete_files")
     reduced = []
+    patches = {}
     seen = set()
     patch_bytes = 0
     for entry in all_files:
@@ -295,6 +207,7 @@ def _files(
             if not isinstance(patch, str):
                 raise GitHubError("github_invalid_patch")
             patch_bytes += len(patch.encode("utf-8", errors="replace"))
+            patches[name] = patch
         if patch_bytes > max_patch_bytes:
             raise InputLimit("pr_patch_limit")
         value = {"filename": name, "status": status}
@@ -303,7 +216,7 @@ def _files(
             url_path(previous)
             value["previous_filename"] = previous
         reduced.append(value)
-    return reduced
+    return reduced, patches
 
 
 def process_event(
@@ -314,6 +227,7 @@ def process_event(
     reviewer: Callable | None = None,
     max_files: int = 300,
     max_patch_bytes: int = 512_000,
+    run_id: int | None = None,
 ) -> dict:
     try:
         context = PullRequestContext.from_event(event, repository)
@@ -347,7 +261,7 @@ def process_event(
         return blob
 
     try:
-        files = _files(api, context, live, max_files, max_patch_bytes)
+        files, patches = _files(api, context, live, max_files, max_patch_bytes)
         effective = api.merge_base(context.repository, context.base_sha, context.head_sha, fork_name)
         context = replace(context, effective_base_sha=effective)
         identity["effective_base_sha"] = effective
@@ -366,6 +280,10 @@ def process_event(
                 fetch_blob=fetch_blob,
             )
         )
+        result["findings"] = [
+            {**finding, "in_diff": line_in_patch(patches.get(finding["file"], ""), finding.get("line"))}
+            for finding in result["findings"]
+        ]
     except InputLimit as exc:
         # InputLimit only contains internal, non-sensitive reason codes.
         reason = exc.args[0] if exc.args and isinstance(exc.args[0], str) and re.fullmatch(r"[a-z_]{1,64}", exc.args[0]) else "input_limit"
@@ -377,11 +295,18 @@ def process_event(
         # Do not propagate their text to workflows or comments.
         result = {"status": "error", "findings": [], "reason": "reviewer_or_input_error"}
 
+    if fork_name:
+        try:
+            repo_segment(fork_name)
+        except ValueError:
+            pass
+        else:
+            identity["head_repository"] = fork_name
     try:
         if _current(api, context) is None:
             return {**identity, **result, "status": "superseded", "action": "none",
                     "review_status": result["status"], "delivery_status": "superseded"}
-        action = _manage_comment(api, context, result)
+        action, comment_id = _manage_comment(api, context, {**identity, **result}, run_id)
         if action == "superseded":
             return {**identity, **result, "status": "superseded", "action": "none",
                     "review_status": result["status"], "delivery_status": "superseded"}
@@ -393,5 +318,7 @@ def process_event(
         reason = exc.code if isinstance(exc, GitHubError) else "comment_unavailable"
         return {**identity, **result, "status": "error", "action": "none", "reason": reason,
                 "review_status": result["status"], "delivery_status": "failed"}
+    if comment_id is not None:
+        result["comment_id"] = comment_id
     return {**identity, **result, "action": action, "review_status": result["status"],
             "delivery_status": "not_needed" if action == "none" else "completed"}
