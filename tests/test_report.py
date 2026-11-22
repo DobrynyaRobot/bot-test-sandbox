@@ -1,8 +1,11 @@
 """Run with PYTHONPATH=src python3 -B -m unittest discover -s tests."""
 
 from hashlib import sha256
+from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
+from github_bot import process_event
 from github_bot.report import MARKER, line_in_patch, review_markdown
 
 
@@ -92,6 +95,47 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("external.example/rule", body)
         self.assertNotIn("<!-- html -->", body)
         self.assertIn("plugins/x%5D/package.json#L5", body)
+
+
+class BasePolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.repository = "example/sandbox"
+        self.policy = ".github/architecture-review.json"
+        self.pr = {"number": 42, "state": "open", "changed_files": 1,
+                   "base": {"sha": BASE, "repo": {"full_name": self.repository}},
+                   "head": {"sha": HEAD}}
+        self.api = Mock()
+        self.api.pr.return_value = self.pr
+        self.api.files.return_value = [{"filename": PATH, "status": "modified"}]
+        self.api.merge_base.return_value = BASE
+        self.api.comments.return_value = []
+
+    def test_latest_reviewer_uses_original_pr_base_policy(self):
+        self.api.fetch_blob.return_value = b'"policy-on-original-base"'
+        handled = []
+
+        def reviewer(*, policy_path, base_sha, **kwargs):
+            self.assertEqual(base_sha, BASE)
+            self.assertEqual(policy_path.read_bytes(), b'"policy-on-original-base"')
+            handled.append(policy_path)
+            return {"status": "clean"}
+
+        result = process_event(self.api, {"pull_request": self.pr}, self.repository, Path(self.policy),
+                               reviewer=reviewer, base_policy_path=self.policy)
+        self.assertEqual(result["status"], "clean")
+        self.api.fetch_blob.assert_called_once_with(self.repository, self.policy, BASE)
+        self.assertFalse(handled[0].exists())
+        self.api.create_comment.assert_not_called()
+
+    def test_base_without_settings_reports_unsupported(self):
+        self.api.fetch_blob.return_value = None
+        reviewer = Mock()
+        result = process_event(self.api, {"pull_request": self.pr}, self.repository, Path(self.policy),
+                               reviewer=reviewer, base_policy_path=self.policy)
+        self.assertEqual(result["status"], "unsupported")
+        self.assertIn("Обновите PR от основной ветки", review_markdown(result))
+        reviewer.assert_not_called()
+        self.api.create_comment.assert_not_called()
 
 
 if __name__ == "__main__":
