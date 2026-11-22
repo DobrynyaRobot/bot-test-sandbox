@@ -1,11 +1,13 @@
-"""Bind a completed read-only workflow signal to one current pull request."""
+"""Bind a trusted workflow event to one current pull request."""
 
 from datetime import datetime
+import re
 
-from .github import GitHubClient, positive_id, repo_segment, revision_sha
+from .github import GitHubClient, GitHubError, positive_id, repo_segment, revision_sha
 
 SIGNAL = ".github/workflows/architecture-review-request.yml"
 TARGET = "main"
+MODE_LABELS = {"aact": "AACT", "agent": "Агент", "hybrid": "Гибрид"}
 
 
 def _time(value: str) -> datetime:
@@ -13,6 +15,36 @@ def _time(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("signal_timestamp")
     return parsed
+
+
+def manual_inputs(event: dict, ref: str) -> tuple[int, str]:
+    if ref != f"refs/heads/{TARGET}":
+        raise ValueError("manual_review_ref")
+    inputs = event["inputs"]
+    number, mode = inputs["pr_number"], inputs.get("mode", "aact")
+    if not re.fullmatch(r"[1-9][0-9]{0,17}", str(number)) or not isinstance(mode, str) or mode not in MODE_LABELS:
+        raise ValueError("invalid_manual_inputs")
+    return positive_id(int(number)), mode
+
+
+def resolve_manual(api: GitHubClient, event: dict, repository: str, number: int) -> dict | None:
+    repo_segment(repository)
+    event_repo = event["repository"]
+    if event_repo["full_name"].casefold() != repository.casefold():
+        raise ValueError("manual_review_repository")
+    try:
+        pr = api.pr(repository, number)
+    except GitHubError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    base = pr["base"]
+    if (pr.get("number") != number or base["repo"]["id"] != positive_id(event_repo["id"])
+            or base["repo"]["full_name"].casefold() != repository.casefold()):
+        raise ValueError("manual_review_repository")
+    if pr.get("state") != "open" or base["ref"] != TARGET:
+        return None
+    return {"number": number, "pull_request": pr}
 
 
 def resolve_signal(api: GitHubClient, event: dict, repository: str) -> dict | None:

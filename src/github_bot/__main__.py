@@ -8,10 +8,11 @@ import sys
 from pathlib import Path
 
 from . import GitHubClient, PullRequestContext, _current, process_event
+from .agent import select_reviewer
 from .checks import publish_check
 from .github import GitHubError, InputLimit, positive_id, revision_sha
 from .report import review_markdown, workflow_annotation
-from .routing import resolve_signal
+from .routing import manual_inputs, resolve_manual, resolve_signal
 
 MAX_EVENT_BYTES = 1_048_576
 
@@ -59,12 +60,16 @@ def main(argv=None) -> int:
     parser.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"))
     parser.add_argument("--policy", type=Path, default=os.environ.get("ARCH_REVIEW_POLICY") or ".github/architecture-review.json")
     parser.add_argument("--verify-checkout", action="store_true")
-    parser.add_argument("--workflow-run", action="store_true", help="Resolve a trusted workflow_run signal")
+    trigger = parser.add_mutually_exclusive_group()
+    trigger.add_argument("--workflow-run", action="store_true", help="Resolve a trusted workflow_run signal")
+    trigger.add_argument("--workflow-dispatch", action="store_true", help="Review a PR in the selected manual mode")
     parser.add_argument("--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     args = parser.parse_args(argv)
-    # Credentials remain solely in the Python GitHub transport. Subprocesses
-    # including Git and the formal reviewer do not inherit this token.
+    # Keep API credentials in their Python callers and out of subprocesses.
     token = os.environ.pop("GITHUB_TOKEN", "")
+    openai_key = os.environ.pop("OPENAI_API_KEY", "")
+    actions_event = args.workflow_run or args.workflow_dispatch
+    mode = "aact"
     try:
         run_id = positive_id(int(os.environ.get("GITHUB_RUN_ID", "")))
     except ValueError:
@@ -79,28 +84,38 @@ def main(argv=None) -> int:
         if not policy.is_relative_to(checkout):
             raise ValueError("policy_outside_checkout")
         api = GitHubClient(token, base_url=args.api_url)
-        if args.workflow_run:
+        if actions_event:
             if not args.verify_checkout or not run_id:
                 raise ValueError("workflow_run_requires_verified_checkout")
             workflow_sha = revision_sha(os.environ.get("GITHUB_WORKFLOW_SHA"))
             _verify_checkout(checkout, workflow_sha)
-            event = resolve_signal(api, event, args.repository)
+            if args.workflow_dispatch:
+                number, mode = manual_inputs(event, os.environ.get("GITHUB_REF", ""))
+                event = resolve_manual(api, event, args.repository, number)
+            else:
+                event = resolve_signal(api, event, args.repository)
         if event is None:
-            result = {"status": "superseded", "action": "none", "findings": [], "reason": "signal_without_current_pr"}
+            status, reason = (("error", "manual_pr_not_open") if args.workflow_dispatch else
+                              ("superseded", "signal_without_current_pr"))
+            result = {"status": status, "action": "none", "findings": [], "reason": reason}
         else:
             context = PullRequestContext.from_event(event, args.repository)
             base_policy_path = None
             if args.verify_checkout:
                 workflow_sha = revision_sha(os.environ.get("GITHUB_WORKFLOW_SHA") or context.base_sha)
-                if not args.workflow_run:
+                if not actions_event:
                     _verify_checkout(checkout, workflow_sha)
                 if workflow_sha != context.base_sha:
                     base_policy_path = policy.relative_to(checkout).as_posix()
-            if args.workflow_run and os.environ.get("ARCH_REVIEW_SETUP_FAILED") == "true":
+            setup_failed = actions_event and os.environ.get("ARCH_REVIEW_SETUP_FAILED") == "true"
+            if setup_failed and mode == "aact":
                 result = {"status": "error", "action": "none", "findings": [], "reason": "engine_setup_failed"}
             else:
-                result = process_event(api, event, args.repository, policy, run_id=run_id, base_policy_path=base_policy_path)
-            if args.workflow_run and result["status"] != "superseded":
+                reviewer = select_reviewer(mode, openai_key, formal_setup_failed=setup_failed)
+                result = process_event(api, event, args.repository, policy, run_id=run_id, base_policy_path=base_policy_path,
+                                       reviewer=reviewer, publish_comments=not args.workflow_dispatch)
+            result.update(mode=mode, manual=args.workflow_dispatch)
+            if actions_event and result["status"] != "superseded":
                 try:
                     result = {"repository": context.repository, "head_sha": context.head_sha,
                               "number": context.number, **result}
@@ -114,10 +129,12 @@ def main(argv=None) -> int:
         reason = exc.code if isinstance(exc, GitHubError) else "invalid_checkout_or_github_context"
         result = {"status": "error", "action": "none", "findings": [], "reason": reason}
 
+    result.update(mode=mode, manual=args.workflow_dispatch)
     summary_written = _write_summary(result, context)
     allowed = {"repository", "number", "base_sha", "head_sha", "effective_base_sha", "status",
                "action", "reason", "review_status", "delivery_status", "coverage", "scope_code",
-               "diagnostic_codes", "comment_id", "check_id", "check_action", "unverified_previous"}
+               "diagnostic_codes", "comment_id", "check_id", "check_action", "unverified_previous",
+               "mode", "manual", "agent_model", "agent_usage", "arm_status"}
     receipt = {k: v for k, v in result.items() if k in allowed}
     receipt["findings_count"] = len(result.get("findings", []))
     receipt["resolved_count"] = len(result.get("confirmations", []))

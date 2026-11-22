@@ -2,6 +2,7 @@
 
 from .github import GitHubClient, GitHubError, positive_id, revision_sha
 from .report import check_summary, status_label
+from .routing import MODE_LABELS
 
 NAME = "Архитектура"
 
@@ -12,7 +13,7 @@ def _conclusion(result: dict) -> str:
         return "failure"
     if status == "unsupported" and "no_supported_manifests" in result.get("diagnostic_codes", []):
         return "skipped"
-    if status == "clean" and result.get("coverage") == "complete_scoped":
+    if status == "clean" and result.get("coverage") == "complete_scoped" and result.get("mode") != "agent":
         return "success"
     return "neutral"
 
@@ -22,6 +23,10 @@ def publish_check(api: GitHubClient, result: dict, run_id: int) -> tuple[int, st
     number = positive_id(result["number"])
     name = f"{NAME} · PR № {number}"
     external_id = f"architecture-review/pr/{number}"
+    if result.get("manual"):
+        mode = result["mode"]
+        name += f" · {MODE_LABELS[mode]} (вручную)"
+        external_id += f"/manual/{mode}"
     details = f"https://github.com/{repository}/actions/runs/{positive_id(run_id)}"
     existing = [check for check in api.checks(repository, sha, name)
                 if check.get("head_sha") == sha and check.get("name") == name
