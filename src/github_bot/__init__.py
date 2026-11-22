@@ -1,4 +1,4 @@
-"""Comment-only GitHub integration for the packaged AACT reviewer."""
+"""GitHub integration for reviews of pinned pull requests."""
 
 from __future__ import annotations
 
@@ -37,6 +37,22 @@ KNOWN_DIAGNOSTIC_PREFIXES = {
     "AACT processing timed out": "reviewer_timeout",
     "AACT model projection failed": "manifest_projection_failed",
     "AACT engine is missing": "engine_missing",
+    "engine_setup_failed": "engine_setup_failed",
+    "agent_key_missing": "agent_key_missing",
+    "agent_auth": "agent_auth",
+    "agent_rate_limit": "agent_rate_limit",
+    "agent_http_error": "agent_http_error",
+    "agent_delivery_unknown": "agent_delivery_unknown",
+    "agent_response_limit": "agent_response_limit",
+    "agent_context_limit": "agent_context_limit",
+    "agent_manifest_invalid": "agent_manifest_invalid",
+    "agent_input_unavailable": "agent_input_unavailable",
+    "agent_invalid_response": "agent_invalid_response",
+    "agent_model_mismatch": "agent_model_mismatch",
+    "agent_unverified_evidence": "agent_unverified_evidence",
+    "agent_refusal": "agent_refusal",
+    "agent_incomplete": "agent_incomplete",
+    "agent_uncertain": "agent_uncertain",
 }
 
 
@@ -132,7 +148,8 @@ def _review_result(value: dict) -> dict:
     elif diagnostics:
         codes.add("unclassified")
     return {
-        **{name: value[name] for name in ("policy_hash", "coverage_counts", "history_evidence") if name in value},
+        **{name: value[name] for name in ("policy_hash", "coverage_counts", "history_evidence",
+                                        "agent_model", "agent_usage", "arm_status") if name in value},
         "status": value["status"],
         "findings": findings,
         "reason": "reviewer_" + value["status"],
@@ -256,6 +273,7 @@ def process_event(
     max_patch_bytes: int = 512_000,
     run_id: int | None = None,
     base_policy_path: str | None = None,
+    publish_comments: bool = True,
 ) -> dict:
     try:
         context = PullRequestContext.from_event(event, repository)
@@ -349,7 +367,8 @@ def process_event(
         if _current(api, context) is None:
             return {**identity, **result, "status": "superseded", "action": "none",
                     "review_status": result["status"], "delivery_status": "superseded"}
-        action, comment_id = _manage_comment(api, context, result, run_id, changed_paths)
+        action, comment_id = (_manage_comment(api, context, result, run_id, changed_paths)
+                              if publish_comments else ("none", None))
         if action == "superseded":
             return {**identity, **result, "status": "superseded", "action": "none",
                     "review_status": result["status"], "delivery_status": "superseded"}

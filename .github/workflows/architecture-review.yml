@@ -1,20 +1,34 @@
 name: Architecture review
-run-name: "Архитектурная проверка · ${{ github.event.workflow_run.head_branch }}"
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Архитектура · PR № {0} · {1}', inputs.pr_number, inputs.mode) || format('Архитектурная проверка · {0}', github.event.workflow_run.head_branch) }}
 
 on:
   workflow_run:
     workflows: [Architecture review request]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Номер открытого PR в main
+        required: true
+        type: string
+      mode:
+        description: Способ архитектурной проверки
+        required: true
+        type: choice
+        default: aact
+        options: [aact, agent, hybrid]
 
 permissions: {}
 
 concurrency:
-  group: architecture-review-${{ github.repository_id }}-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
+  group: ${{ github.event_name == 'workflow_dispatch' && format('architecture-review-manual-{0}-{1}-{2}', github.repository_id, inputs.pr_number, inputs.mode) || format('architecture-review-{0}-{1}-{2}', github.repository_id, github.event.workflow_run.head_repository.id, github.event.workflow_run.head_branch) }}
   cancel-in-progress: false
 
 jobs:
   architecture-review:
-    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: read
       pull-requests: write
@@ -35,12 +49,14 @@ jobs:
           submodules: false
 
       - name: Install Node runtime
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'agent'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.22.0"
 
       - name: Install locked AACT
         id: engine
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'agent'
         run: python3 src/aact_reviewer/install_engine.py
 
       - name: Review PR and write summary
@@ -48,10 +64,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (inputs.mode == 'agent' || inputs.mode == 'hybrid') && secrets.OPENAI_API_KEY || '' }}
           ARCH_REVIEW_POLICY: ${{ vars.ARCH_REVIEW_POLICY || '.github/architecture-review.json' }}
-          ARCH_REVIEW_SETUP_FAILED: ${{ steps.engine.outcome != 'success' }}
+          ARCH_REVIEW_SETUP_FAILED: ${{ (github.event_name != 'workflow_dispatch' || inputs.mode != 'agent') && steps.engine.outcome != 'success' }}
           PYTHONPATH: src
-        run: python3 -B -m github_bot --verify-checkout --workflow-run
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            python3 -B -m github_bot --verify-checkout --workflow-dispatch
+          else
+            python3 -B -m github_bot --verify-checkout --workflow-run
+          fi
 
       - name: Explain setup failure
         if: failure() && steps.review.outcome == 'skipped'

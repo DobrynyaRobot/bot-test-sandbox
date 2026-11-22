@@ -5,6 +5,7 @@ import re
 from urllib.parse import unquote, urlsplit
 
 from .github import repo_segment, revision_sha, url_path
+from .routing import MODE_LABELS
 
 ORIGIN = "https://github.com"
 MARKER = "<!-- architecture-review-benchmark:v1 -->"
@@ -16,6 +17,22 @@ STATUS_LABELS = {
     "superseded": "результат устарел",
 }
 DIAGNOSTICS = {
+    "manual_pr_not_open": "Укажите номер открытого PR, направленного в main.",
+    "agent_key_missing": "Добавьте секрет OPENAI_API_KEY в GitHub Actions, чтобы запустить агентскую часть.",
+    "agent_auth": "OpenAI отклонил запрос. Проверьте ключ и доступ проекта API к модели.",
+    "agent_rate_limit": "OpenAI ограничил частоту запросов или исчерпан лимит проекта.",
+    "agent_http_error": "OpenAI вернул ошибку при запросе к модели.",
+    "agent_delivery_unknown": "Ответ OpenAI не получен. Перед повтором проверьте журнал API проекта.",
+    "agent_response_limit": "Размер ответа агента превысил лимит.",
+    "agent_context_limit": "Изменения и документы превысили лимит входа агента.",
+    "agent_manifest_invalid": "Один из манифестов не удалось прочитать или идентифицировать.",
+    "agent_input_unavailable": "GitHub не предоставил агенту необходимые исходники.",
+    "agent_invalid_response": "Ответ агента имеет некорректный формат.",
+    "agent_model_mismatch": "OpenAI вернул результат от другой версии модели.",
+    "agent_unverified_evidence": "Не удалось подтвердить приведённую агентом строку или новое ребро зависимости.",
+    "agent_refusal": "Модель отказалась проводить проверку.",
+    "agent_incomplete": "Ответ модели оказался неполным.",
+    "agent_uncertain": "Агенту недостаточно данных для вердикта.",
     "base_policy_unavailable": "В базовой ревизии PR ещё нет настроек проверки. Обновите PR от основной ветки.",
     "base_rule_anchors_missing": "В базовой ревизии не найден нужный раздел документа с правилом.",
     "baseline_edge_unresolved": "Не удалось сравнить одну из зависимостей с базовой ревизией.",
@@ -115,7 +132,9 @@ def _finding_markdown(finding: dict, result: dict, pr_url: str) -> str:
 
     source = _rule_source(finding["source"], repository, result.get("effective_base_sha") or result.get("base_sha"))
     dependency = finding.get("dependency")
-    app_core = finding.get("rule_id") == "package-app-core" and isinstance(dependency, str) and PACKAGE.fullmatch(dependency)
+    from_agent = finding.get("origin") == "agent"
+    app_core = (not from_agent and finding.get("rule_id") == "package-app-core"
+                and isinstance(dependency, str) and PACKAGE.fullmatch(dependency))
     if source:
         rule_link = "Правило App Core" if app_core else "Документ с правилом"
         links.insert(0, f"[{rule_link}]({source})")
@@ -126,6 +145,12 @@ def _finding_markdown(finding: dict, result: dict, pr_url: str) -> str:
     else:
         problem = f"{_code(finding['rule'], 250)} · {_code(finding['problem'], 750)}"
         fix = _code(finding["recommendation"], 700)
+    if from_agent:
+        problem = "**Замечание агента.** " + problem
+    elif finding.get("origin") == "both":
+        problem = "**AACT и агент.** " + problem
+    elif result.get("mode") == "hybrid":
+        problem = "**Находка AACT.** " + problem
 
     lines = [f"#### {location}", "", problem, "", f"**Как исправить.** {fix}"]
     if links:
@@ -156,7 +181,11 @@ def _display_status(result: dict) -> str:
 
 def _status_label(result: dict, status: str) -> str:
     if status == "violation":
+        if any(item.get("origin") == "agent" for item in result["findings"]):
+            return f"новых замечаний — {len(result['findings'])}"
         return f"новых нарушений — {len(result['findings'])}"
+    if status == "clean" and result.get("mode") == "agent":
+        return "агент не нашёл новых замечаний"
     if status == "unsupported" and "no_supported_manifests" in result.get("diagnostic_codes", []):
         return "правило неприменимо к изменениям"
     return STATUS_LABELS[status]
@@ -245,11 +274,16 @@ def _review(result: dict, run_id: int | None, comment: bool, limit: int, byte_li
     delivery = result.get("delivery_status")
     prefix = [MARKER] if comment else []
     prefix.append(f"### Архитектурная проверка · {status_label(result)}")
+    if result.get("manual"):
+        prefix.append(f"Режим · **{MODE_LABELS[result['mode']]}**")
     message = _status_message(status, diagnostics)
+    if status == "clean" and result.get("mode") == "agent":
+        message = "Агент не нашёл новых замечаний в переданных манифестах."
     if message:
         prefix.append(message)
     if result.get("coverage") == "partial" and status in {"violation", "clean", "unsupported"}:
-        prefix.append("**Проверка охватила только часть зависимостей.**")
+        prefix.append("**Проверка неполна.**" if result.get("arm_status") else
+                      "**Проверка охватила только часть зависимостей.**")
     pr_url, links = _links(result, run_id, comment)
     footer = []
     findings = result.get("findings", []) if status == "violation" else []
@@ -290,6 +324,12 @@ def _review(result: dict, run_id: int | None, comment: bool, limit: int, byte_li
         footer.append(f"**Доставка комментария.** {detail}.")
     if result.get("check_action") == "unconfirmed":
         footer.append("**Публикация в Checks.** GitHub не подтвердил обновление. Итог доступен в этом запуске.")
+    if statuses := result.get("arm_status"):
+        labels = {**STATUS_LABELS, "not_run": "пропущен"}
+        agent_status = "новых замечаний не найдено" if statuses["agent"] == "clean" else labels[statuses["agent"]]
+        footer.append(f"AACT · {labels[statuses['aact']]} · Агент · {agent_status}")
+    if model := result.get("agent_model"):
+        footer.append(f"Модель · {_code(model, 100)}")
     if not comment and (status == "error" or delivery in {"failed", "unknown"}) and result.get("reason"):
         footer.append(f"Код для диагностики · {_code(result['reason'], 80)}.")
     if links:
