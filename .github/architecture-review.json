@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "repositories": [
+    "DobrynyaRobot/bot-test-sandbox"
+  ],
+  "manifest_globs": [
+    "plugins/**/package.json",
+    "packages/**/package.json"
+  ],
+  "rules": {
+    "package-app-core": {
+      "targets": [
+        "@backstage/core-app-api",
+        "@backstage/frontend-app-api"
+      ],
+      "document": "docs/architecture-policy.md",
+      "contains": [
+        "Frontend App Core",
+        "only used by the `app` package"
+      ]
+    }
+  }
+}

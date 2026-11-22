@@ -1,0 +1,20 @@
+{
+  "engine": {
+    "name": "aact",
+    "version": "3.0.1",
+    "license": "GPL-3.0 (npm package metadata)",
+    "source": "https://github.com/Byndyusoft/aact",
+    "package_tarball_redistributed": false
+  },
+  "rules": {
+    "original_path": "package_boundaries/rules.mjs",
+    "stack": "001–009",
+    "operation": "copied unchanged",
+    "sha256": "dbcb53b098295ae28eddc5e8a81fde11bfa04d6cc3d34f1932166aac9ff72921"
+  },
+  "npm_lock_sha256": "bb68e9c6d258df6fc0642a5cf352fbc71befca99ca93a735125f4954ebabad41",
+  "starting_fixture": {
+    "original_path": "package_boundaries/models/pt_backstage_10752/head.json",
+    "sha256": "51f139265d2d7431265513ed099ca08d6c499171e2213d45f19a1d8915f5fd8b"
+  }
+}
