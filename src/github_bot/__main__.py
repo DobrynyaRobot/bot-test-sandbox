@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import GitHubClient, PullRequestContext, process_event
 from .github import positive_id, revision_sha
-from .report import review_markdown
+from .report import review_markdown, workflow_annotation
 
 MAX_EVENT_BYTES = 1_048_576
 
@@ -35,10 +35,10 @@ def _verify_checkout(path: Path, sha: str) -> None:
         raise ValueError("checkout_revision_mismatch")
 
 
-def _write_summary(result: dict, context: PullRequestContext | None) -> None:
+def _write_summary(result: dict, context: PullRequestContext | None) -> bool:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary:
-        return
+        return False
     if context:
         result = {"repository": context.repository, "number": context.number,
                   "head_sha": context.head_sha, **result}
@@ -47,6 +47,8 @@ def _write_summary(result: dict, context: PullRequestContext | None) -> None:
             file.write(review_markdown(result))
     except OSError:
         print("Could not write the GitHub Actions summary.", file=sys.stderr)
+        return False
+    return True
 
 
 def main(argv=None) -> int:
@@ -87,12 +89,15 @@ def main(argv=None) -> int:
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
         result = {"status": "error", "action": "none", "findings": [], "reason": "invalid_checkout_or_github_context"}
 
-    _write_summary(result, context)
+    summary_written = _write_summary(result, context)
     allowed = {"repository", "number", "base_sha", "head_sha", "effective_base_sha", "status",
                "action", "reason", "review_status", "delivery_status", "coverage", "scope_code",
                "diagnostic_codes", "comment_id"}
     receipt = {k: v for k, v in result.items() if k in allowed}
     receipt["findings_count"] = len(result.get("findings", []))
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(workflow_annotation(result), flush=True)
+        receipt["summary_written"] = summary_written
     print(json.dumps(receipt, sort_keys=True), flush=True)
     return 2 if result["status"] == "error" else 0
 

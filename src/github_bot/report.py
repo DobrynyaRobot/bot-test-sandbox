@@ -146,18 +146,43 @@ def _status_message(status: str, diagnostics: list[str]) -> str:
     return ""
 
 
-def review_markdown(result: dict, *, run_id: int | None = None, comment: bool = False) -> str:
+def _display_status(result: dict) -> str:
     status = result["status"]
+    if status == "error" and result.get("delivery_status") in ("failed", "unknown"):
+        return result.get("review_status", status)
+    return status
+
+
+def _status_label(result: dict, status: str) -> str:
+    if status == "violation":
+        return f"новых нарушений — {len(result['findings'])}"
+    if status == "unsupported" and "no_supported_manifests" in result.get("diagnostic_codes", []):
+        return "правило неприменимо к изменениям"
+    return STATUS_LABELS[status]
+
+
+def workflow_annotation(result: dict) -> str:
+    status = _display_status(result)
+    message = _status_label(result, status).capitalize() + "."
+    if result.get("delivery_status") in ("failed", "unknown"):
+        message += " GitHub не подтвердил обновление комментария."
+    if result.get("coverage") == "partial" and status in {"clean", "violation"}:
+        message += " Покрытие неполное."
+    if result["status"] == "error":
+        level = "error"
+    elif status == "violation" or (status == "unsupported" and "no_supported_manifests" not in result.get("diagnostic_codes", [])):
+        level = "warning"
+    else:
+        level = "notice"
+    return f"::{level} title=Архитектурная проверка::{message}"
+
+
+def review_markdown(result: dict, *, run_id: int | None = None, comment: bool = False) -> str:
+    status = _display_status(result)
     delivery = result.get("delivery_status")
-    if status == "error" and delivery in ("failed", "unknown"):
-        status = result.get("review_status", status)
     diagnostics = result.get("diagnostic_codes", [])
-    label = STATUS_LABELS[status]
+    label = _status_label(result, status)
     findings = result.get("findings", []) if status == "violation" else []
-    if findings:
-        label = f"новых нарушений — {len(findings)}"
-    elif status == "unsupported" and "no_supported_manifests" in diagnostics:
-        label = "правило неприменимо к изменениям"
     prefix = [MARKER] if comment else []
     prefix.extend([f"### Архитектурная проверка · {label}", ""])
 
