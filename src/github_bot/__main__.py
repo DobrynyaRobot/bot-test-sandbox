@@ -7,9 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import GitHubClient, PullRequestContext, process_event
-from .github import positive_id, revision_sha
+from . import GitHubClient, PullRequestContext, _current, process_event
+from .checks import publish_check
+from .github import GitHubError, InputLimit, positive_id, revision_sha
 from .report import review_markdown, workflow_annotation
+from .routing import resolve_signal
 
 MAX_EVENT_BYTES = 1_048_576
 
@@ -57,6 +59,7 @@ def main(argv=None) -> int:
     parser.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"))
     parser.add_argument("--policy", type=Path, default=os.environ.get("ARCH_REVIEW_POLICY") or ".github/architecture-review.json")
     parser.add_argument("--verify-checkout", action="store_true")
+    parser.add_argument("--workflow-run", action="store_true", help="Resolve a trusted workflow_run signal")
     parser.add_argument("--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     args = parser.parse_args(argv)
     # Credentials remain solely in the Python GitHub transport. Subprocesses
@@ -71,32 +74,57 @@ def main(argv=None) -> int:
         if not args.repository or not args.event:
             raise ValueError("missing_github_context")
         event = _event(args.event)
-        context = PullRequestContext.from_event(event, args.repository)
         checkout = Path.cwd().resolve()
         policy = (checkout / args.policy).resolve()
         if not policy.is_relative_to(checkout):
             raise ValueError("policy_outside_checkout")
-        base_policy_path = None
-        if args.verify_checkout:
-            workflow_sha = revision_sha(os.environ.get("GITHUB_WORKFLOW_SHA") or context.base_sha)
+        api = GitHubClient(token, base_url=args.api_url)
+        if args.workflow_run:
+            if not args.verify_checkout or not run_id:
+                raise ValueError("workflow_run_requires_verified_checkout")
+            workflow_sha = revision_sha(os.environ.get("GITHUB_WORKFLOW_SHA"))
             _verify_checkout(checkout, workflow_sha)
-            if workflow_sha != context.base_sha:
-                base_policy_path = policy.relative_to(checkout).as_posix()
-        result = process_event(
-            GitHubClient(token, base_url=args.api_url), event, args.repository, policy,
-            run_id=run_id, base_policy_path=base_policy_path,
-        )
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
-        result = {"status": "error", "action": "none", "findings": [], "reason": "invalid_checkout_or_github_context"}
+            event = resolve_signal(api, event, args.repository)
+        if event is None:
+            result = {"status": "superseded", "action": "none", "findings": [], "reason": "signal_without_current_pr"}
+        else:
+            context = PullRequestContext.from_event(event, args.repository)
+            base_policy_path = None
+            if args.verify_checkout:
+                workflow_sha = revision_sha(os.environ.get("GITHUB_WORKFLOW_SHA") or context.base_sha)
+                if not args.workflow_run:
+                    _verify_checkout(checkout, workflow_sha)
+                if workflow_sha != context.base_sha:
+                    base_policy_path = policy.relative_to(checkout).as_posix()
+            if args.workflow_run and os.environ.get("ARCH_REVIEW_SETUP_FAILED") == "true":
+                result = {"status": "error", "action": "none", "findings": [], "reason": "engine_setup_failed"}
+            else:
+                result = process_event(api, event, args.repository, policy, run_id=run_id, base_policy_path=base_policy_path)
+            if args.workflow_run and result["status"] != "superseded":
+                try:
+                    result = {"repository": context.repository, "head_sha": context.head_sha,
+                              "number": context.number, **result}
+                    if _current(api, context) is None:
+                        result["check_action"] = "superseded"
+                    else:
+                        result["check_id"], result["check_action"] = publish_check(api, result, run_id)
+                except (GitHubError, InputLimit, TypeError, ValueError):
+                    result["check_action"] = "unconfirmed"
+    except (GitHubError, InputLimit, OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError) as exc:
+        reason = exc.code if isinstance(exc, GitHubError) else "invalid_checkout_or_github_context"
+        result = {"status": "error", "action": "none", "findings": [], "reason": reason}
 
     summary_written = _write_summary(result, context)
     allowed = {"repository", "number", "base_sha", "head_sha", "effective_base_sha", "status",
                "action", "reason", "review_status", "delivery_status", "coverage", "scope_code",
-               "diagnostic_codes", "comment_id"}
+               "diagnostic_codes", "comment_id", "check_id", "check_action", "unverified_previous"}
     receipt = {k: v for k, v in result.items() if k in allowed}
     receipt["findings_count"] = len(result.get("findings", []))
+    receipt["resolved_count"] = len(result.get("confirmations", []))
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(workflow_annotation(result), flush=True)
+        if result.get("check_action") == "unconfirmed":
+            print("::warning title=Checks::GitHub не подтвердил публикацию в Checks. Итог есть в отчёте запуска.", flush=True)
         receipt["summary_written"] = summary_written
     print(json.dumps(receipt, sort_keys=True), flush=True)
     return 2 if result["status"] == "error" else 0

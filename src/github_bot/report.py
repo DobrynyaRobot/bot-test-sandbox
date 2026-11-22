@@ -4,7 +4,7 @@ import hashlib
 import re
 from urllib.parse import unquote, urlsplit
 
-from .github import repo_segment, url_path
+from .github import repo_segment, revision_sha, url_path
 
 ORIGIN = "https://github.com"
 MARKER = "<!-- architecture-review-benchmark:v1 -->"
@@ -22,6 +22,7 @@ DIAGNOSTICS = {
     "blob_size_limit": "Один из нужных файлов превышает лимит размера.",
     "bundled_dependencies": "Список bundled dependencies вне области проверки.",
     "engine_missing": "Перезапустите установку AACT в этом workflow.",
+    "engine_setup_failed": "AACT не запустился. Попросите сопровождающего открыть этап установки в Actions и повторить проверку.",
     "github_rate_limited": "GitHub временно ограничил запросы. Повторите запуск позже.",
     "immutable_blob_missing": "GitHub не предоставил нужный файл на проверяемой ревизии.",
     "manifest_count_limit": "В PR слишком много манифестов для одной проверки.",
@@ -105,7 +106,7 @@ def _finding_markdown(finding: dict, result: dict, pr_url: str) -> str:
             pass
         else:
             blob = f"{ORIGIN}/{head_repo}/blob/{head_sha}/{encoded_path}" + (f"#L{line}" if line else "")
-            if line and finding.get("in_diff"):
+            if pr_url and line and finding.get("in_diff"):
                 digest = hashlib.sha256(path.encode("utf-8")).hexdigest()
                 location = f"[{label}]({pr_url}/files#diff-{digest}R{line})"
                 links.append(f"[Строка в проверенном коммите]({blob})")
@@ -121,7 +122,7 @@ def _finding_markdown(finding: dict, result: dict, pr_url: str) -> str:
 
     if app_core:
         problem = f"Зависимость {_code(dependency, 214)} добавлена в `dependencies` плагина. App Core предназначен для приложения."
-        fix = "Используйте публичный API плагинов. Если зависимость нужна только для тестов или разработки, перенесите её в `devDependencies`."
+        fix = "Для доступа к общим сервисам используйте публичный API плагина. Код сборки приложения, которому нужен App Core, перенесите в пакет `app`. Если пакет нужен только для тестов или разработки, перенесите зависимость в `devDependencies`."
     else:
         problem = f"{_code(finding['rule'], 250)} · {_code(finding['problem'], 750)}"
         fix = _code(finding["recommendation"], 700)
@@ -161,6 +162,13 @@ def _status_label(result: dict, status: str) -> str:
     return STATUS_LABELS[status]
 
 
+def status_label(result: dict) -> str:
+    label = _status_label(result, _display_status(result))
+    if result.get("coverage") == "partial" and _display_status(result) in {"clean", "violation"}:
+        return label + " · частичный охват"
+    return label
+
+
 def workflow_annotation(result: dict) -> str:
     status = _display_status(result)
     message = _status_label(result, status).capitalize() + "."
@@ -177,29 +185,7 @@ def workflow_annotation(result: dict) -> str:
     return f"::{level} title=Архитектурная проверка::{message}"
 
 
-def review_markdown(result: dict, *, run_id: int | None = None, comment: bool = False) -> str:
-    status = _display_status(result)
-    delivery = result.get("delivery_status")
-    diagnostics = result.get("diagnostic_codes", [])
-    label = _status_label(result, status)
-    findings = result.get("findings", []) if status == "violation" else []
-    prefix = [MARKER] if comment else []
-    prefix.extend([f"### Архитектурная проверка · {label}", ""])
-
-    message = _status_message(status, diagnostics)
-    if message:
-        prefix.extend((message, ""))
-    if delivery == "failed":
-        prefix.extend(("GitHub не принял обновление комментария. Результат проверки доступен ниже.", ""))
-    elif delivery == "unknown":
-        prefix.extend(("GitHub не подтвердил обновление комментария. Результат проверки доступен ниже.", ""))
-    if result.get("coverage") == "partial" and status in {"violation", "clean"}:
-        prefix.extend(("**Проверка охватила только часть зависимостей.**", ""))
-    if status in {"violation", "unsupported", "error"}:
-        messages = [DIAGNOSTICS[key] for key in dict.fromkeys([*diagnostics, result.get("reason")]) if key in DIAGNOSTICS]
-        if messages:
-            prefix.extend([*(f"- {message}" for message in messages), ""])
-
+def _links(result: dict, run_id: int | None, comment: bool) -> tuple[str, list[str]]:
     links = []
     pr_url = ""
     if repository := result.get("repository"):
@@ -209,29 +195,133 @@ def review_markdown(result: dict, *, run_id: int | None = None, comment: bool = 
             links.append(f"[Изменения PR № {number}]({pr_url}/files)")
             if not comment and (comment_id := result.get("comment_id")):
                 links.append(f"[Комментарий бота]({pr_url}#issuecomment-{comment_id})")
-        if comment and run_id:
+        if run_id:
             links.append(f"[Отчёт проверки]({root}/actions/runs/{run_id})")
         if head_sha := result.get("head_sha"):
             head_repo = result.get("head_repository", repository)
             links.append(f"[Коммит `{head_sha[:8]}`]({ORIGIN}/{head_repo}/commit/{head_sha})")
-    if links:
-        prefix.extend((" · ".join(links), ""))
+    return pr_url, links
 
-    output = "\n".join(prefix) + "\n"
-    limit, byte_limit = (20, 50_000) if comment else (200, 300_000)
-    shown = 0
+
+def _gap_line(gap: dict, result: dict) -> str:
+    path = gap["file"]
+    phase = gap["phase"]
+    label = _code(path, 570)
+    repo = result.get("repository")
+    sha = result.get("effective_base_sha") or result.get("base_sha")
+    if phase in {"head", "comparison"}:
+        repo = result.get("head_repository") or repo
+        sha = result.get("head_sha")
+    try:
+        root = repo_segment(repo).removeprefix("/repos")
+        href = f"{ORIGIN}{root}/blob/{revision_sha(sha)}/{url_path(path)}"
+    except ValueError:
+        pass
+    else:
+        if phase in {"base", "head", "comparison"}:
+            label = f"[{label}]({href})"
+    stage = {"base": "базовый коммит", "head": "коммит PR", "comparison": "сравнение с базой"}.get(phase, "анализ")
+    section = " · " + _code(gap["section"], 100) if gap.get("section") else ""
+    why = DIAGNOSTICS.get(gap["code"]) or _code(gap["code"], 80)
+    return f"- {label} ({stage}){section} — {why}"
+
+
+def _bounded_list(items, total: int, budget: int) -> list[str]:
+    lines = []
+    for item in items:
+        size = len(item.encode("utf-8")) + 1
+        if size > budget:
+            break
+        budget -= size
+        lines.append(item)
+    if len(lines) < total:
+        lines.append(f"Показано **{len(lines)} из {total}**.")
+    return lines
+
+
+def _review(result: dict, run_id: int | None, comment: bool, limit: int, byte_limit: int) -> str:
+    status = _display_status(result)
+    diagnostics = result.get("diagnostic_codes", [])
+    delivery = result.get("delivery_status")
+    prefix = [MARKER] if comment else []
+    prefix.append(f"### Архитектурная проверка · {status_label(result)}")
+    message = _status_message(status, diagnostics)
+    if message:
+        prefix.append(message)
+    if result.get("coverage") == "partial" and status in {"violation", "clean", "unsupported"}:
+        prefix.append("**Проверка охватила только часть зависимостей.**")
+    pr_url, links = _links(result, run_id, comment)
+    footer = []
+    findings = result.get("findings", []) if status == "violation" else []
+    app_rule = next((f for f in findings if f.get("rule_id") == "package-app-core"), None)
+    if app_rule:
+        source = _rule_source(app_rule["source"], result["repository"], result.get("effective_base_sha") or result.get("base_sha"))
+        if source:
+            footer.append(f"**Считаете замечание ошибочным?** Попросите сопровождающего проверить его в обсуждении PR. Укажите [пункт правила]({source}), зависимость и проверенный коммит.")
+
+    if status != "superseded":
+        confirmations = result.get("confirmations", [])
+        if confirmations:
+            rows = (f"- {_code(item['file'], 570)} · {_code(item['dependency'], 214)} · {_code(item['rule_id'], 100)}" for item in confirmations)
+            footer.append(f"**Исправление подтверждено · {len(confirmations)}**\n\n" +
+                          "\n".join(_bounded_list(rows, len(confirmations), byte_limit // 8)))
+        if pending := result.get("unverified_previous"):
+            footer.append(f"**Прежние замечания без подтверждения исправления · {pending}.**")
+
+    gaps = result.get("coverage_gaps", [])
+    if gaps and status != "superseded":
+        rows = (_gap_line(gap, result) for gap in gaps)
+        footer.append("**Что осталось проверить вручную**\n\n" +
+                      "\n".join(_bounded_list(rows, len(gaps), byte_limit // 8)))
+    if status in {"clean", "violation", "unsupported", "error"}:
+        gap_codes = {gap["code"] for gap in gaps}
+        messages = [DIAGNOSTICS[key] for key in dict.fromkeys([*diagnostics, result.get("reason")])
+                    if key in DIAGNOSTICS and key not in gap_codes]
+        if messages:
+            footer.append("\n".join(f"- {message}" for message in messages))
+    if result.get("scope_code") == "direct_package_declarations" and status in {"clean", "violation", "unsupported"}:
+        footer.append("Область проверки · прямые зависимости в изменённых `package.json` по настроенным путям.")
+        counts = result.get("coverage_counts", {})
+        base_count, head_count = counts.get("base_manifests"), counts.get("head_manifests")
+        if type(base_count) is int and type(head_count) is int:
+            footer.append(f"Прочитано манифестов · база — {base_count}, коммит PR — {head_count}.")
+    if delivery in {"failed", "unknown"}:
+        detail = "GitHub не принял обновление комментария" if delivery == "failed" else "GitHub не подтвердил обновление комментария"
+        footer.append(f"**Доставка комментария.** {detail}.")
+    if result.get("check_action") == "unconfirmed":
+        footer.append("**Публикация в Checks.** GitHub не подтвердил обновление. Итог доступен в этом запуске.")
+    if not comment and (status == "error" or delivery in {"failed", "unknown"}) and result.get("reason"):
+        footer.append(f"Код для диагностики · {_code(result['reason'], 80)}.")
+    if links:
+        footer.append(" · ".join(links))
+
+    sections = [*prefix]
     if findings:
-        findings = sorted(findings, key=lambda f: (f["file"], str(f.get("line")), f["rule"], f["problem"]))
-        for finding in findings[:limit]:
-            block = _finding_markdown(finding, result, pr_url)
-            if len(output.encode("utf-8")) + len(block.encode("utf-8")) > byte_limit - 1024:
+        budget = byte_limit - len("\n\n".join(prefix + footer).encode("utf-8")) - 512
+        blocks = []
+        def order(item):
+            line = item.get("line")
+            return item["file"], line if type(line) is int else 1_000_001, item["rule"], item["problem"]
+        for finding in sorted(findings, key=order)[:limit]:
+            block = _finding_markdown(finding, result, pr_url).rstrip()
+            size = len(block.encode("utf-8")) + 2
+            if size > budget:
                 break
-            output += block
-            shown += 1
-        if shown < len(findings):
-            output += f"Показано **{shown} из {len(findings)}** замечаний.\n\n"
-    if result.get("scope_code") == "direct_package_declarations" and status in {"clean", "violation"}:
-        output += "Область проверки · прямые зависимости в изменённых `package.json`.\n"
-    if not comment and (status == "error" or delivery in ("failed", "unknown")) and result.get("reason"):
-        output += f"\nКод для диагностики · {_code(result['reason'], 80)}.\n"
-    return output
+            budget -= size
+            blocks.append(block)
+        sections.extend(blocks[:3] if comment else blocks)
+        if comment and len(blocks) > 3:
+            sections.append(f"<details>\n<summary>Другие замечания · {len(blocks) - 3}</summary>\n\n" +
+                            "\n\n".join(blocks[3:]) + "\n\n</details>")
+        if len(blocks) < len(findings):
+            sections.append(f"Показано **{len(blocks)} из {len(findings)}** замечаний.")
+    return "\n\n".join(sections + footer) + "\n"
+
+
+def review_markdown(result: dict, *, run_id: int | None = None, comment: bool = False) -> str:
+    limit, budget = (20, 50_000) if comment else (200, 300_000)
+    return _review(result, run_id, comment, limit, budget)
+
+
+def check_summary(result: dict, *, run_id: int | None = None) -> str:
+    return _review(result, run_id, False, 3, 45_000)

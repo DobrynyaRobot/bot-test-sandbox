@@ -1,0 +1,18 @@
+name: Architecture review request
+run-name: "Запрос архитектурной проверки · PR № ${{ github.event.pull_request.number }}"
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  review-request:
+    name: Request architecture review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Signal the trusted reviewer
+        run: echo 'Запрос передан проверяющему workflow.'
