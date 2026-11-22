@@ -7,7 +7,8 @@
 | Пример | Где смотреть |
 |---|---|
 | Плагин добавил `@backstage/core-app-api` в `dependencies`. | [Открыть замечание к PR № 2](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/2#issuecomment-7077172576). Нажмите на имя файла, чтобы перейти к строке. Под ней есть исправление, ссылка на правило и ссылка на точный коммит. |
-| Пакет добавили только в `devDependencies`. | [Посмотреть изменения в PR № 3](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/3/files). [Открыть чистый результат в Actions](https://github.com/DobrynyaRobot/bot-test-sandbox/actions/runs/45015668745). |
+| Пакет добавили только в `devDependencies`. | [Посмотреть изменения в PR № 3](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/3/files). [Открыть чистый результат в Checks](https://github.com/DobrynyaRobot/bot-test-sandbox/runs/137194635981). |
+| Нарушение и исправление в одном PR. | [Нарушение](https://github.com/DobrynyaRobot/bot-test-sandbox/runs/137194022131) · [Частичный охват](https://github.com/DobrynyaRobot/bot-test-sandbox/runs/137194403622) · [Исправление подтверждено](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/8#issuecomment-7078516041). |
 
 В PR откройте **Checks → Архитектура**. Там виден результат для проверенного коммита и переход к запуску в Actions. Статусы отдельно показывают нарушение, чистый результат, частичную проверку, неприменимое правило и сбой. При неполной проверке отчёт подскажет, какой файл или раздел нужно проверить вручную.
 
