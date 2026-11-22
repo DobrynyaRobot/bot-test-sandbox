@@ -5,7 +5,7 @@
     "role": "frontend-plugin"
   },
   "dependencies": {},
-  "peerDependencies": {
+  "devDependencies": {
     "@backstage/core-app-api": "1.0.0"
   }
 }
