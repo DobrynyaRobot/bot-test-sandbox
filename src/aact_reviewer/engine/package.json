@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "aact": "3.0.1",
+    "yaml": "2.9.0"
+  },
+  "name": "architecture-aact-83-case-validation",
+  "version": "2.0.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "private": true,
+  "type": "module"
+}
