@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import GitHubClient, PullRequestContext, process_event
-from .github import positive_id
+from .github import positive_id, revision_sha
 from .report import review_markdown
 
 MAX_EVENT_BYTES = 1_048_576
@@ -74,9 +74,16 @@ def main(argv=None) -> int:
         policy = (checkout / args.policy).resolve()
         if not policy.is_relative_to(checkout):
             raise ValueError("policy_outside_checkout")
+        base_policy_path = None
         if args.verify_checkout:
-            _verify_checkout(checkout, context.base_sha)
-        result = process_event(GitHubClient(token, base_url=args.api_url), event, args.repository, policy, run_id=run_id)
+            workflow_sha = revision_sha(os.environ.get("GITHUB_WORKFLOW_SHA") or context.base_sha)
+            _verify_checkout(checkout, workflow_sha)
+            if workflow_sha != context.base_sha:
+                base_policy_path = policy.relative_to(checkout).as_posix()
+        result = process_event(
+            GitHubClient(token, base_url=args.api_url), event, args.repository, policy,
+            run_id=run_id, base_policy_path=base_policy_path,
+        )
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
         result = {"status": "error", "action": "none", "findings": [], "reason": "invalid_checkout_or_github_context"}
 

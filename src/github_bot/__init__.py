@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Callable
 
 from .github import GitHubClient, GitHubError, InputLimit, positive_id, repo_segment, revision_sha, url_path
@@ -228,6 +230,7 @@ def process_event(
     max_files: int = 300,
     max_patch_bytes: int = 512_000,
     run_id: int | None = None,
+    base_policy_path: str | None = None,
 ) -> dict:
     try:
         context = PullRequestContext.from_event(event, repository)
@@ -270,16 +273,26 @@ def process_event(
         if reviewer is None:
             from aact_reviewer import review
             reviewer = review
-        result = _review_result(
-            reviewer(
-                repo=context.repository,
-                base_sha=context.review_base_sha,
-                head_sha=context.head_sha,
-                files=files,
-                policy_path=Path(policy_path),
-                fetch_blob=fetch_blob,
+        with ExitStack() as temporary:
+            if base_policy_path is not None:
+                # Execute the current trusted reviewer, while using the same
+                # policy bytes as a checkout of the PR's original base.
+                policy_blob = api.fetch_blob(context.repository, base_policy_path, context.base_sha)
+                if policy_blob is None:
+                    raise InputLimit("base_policy_unavailable")
+                directory = temporary.enter_context(TemporaryDirectory(prefix="architecture-policy-"))
+                policy_path = Path(directory) / "policy.json"
+                policy_path.write_bytes(policy_blob)
+            result = _review_result(
+                reviewer(
+                    repo=context.repository,
+                    base_sha=context.review_base_sha,
+                    head_sha=context.head_sha,
+                    files=files,
+                    policy_path=Path(policy_path),
+                    fetch_blob=fetch_blob,
+                )
             )
-        )
         result["findings"] = [
             {**finding, "in_diff": line_in_patch(patches.get(finding["file"], ""), finding.get("line"))}
             for finding in result["findings"]
