@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from github_bot import process_event
-from github_bot.report import MARKER, line_in_patch, review_markdown
+from github_bot.report import MARKER, line_in_patch, review_markdown, workflow_annotation
 
 
 ROOT = "https://github.com/example/sandbox"
@@ -95,6 +95,17 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("external.example/rule", body)
         self.assertNotIn("<!-- html -->", body)
         self.assertIn("plugins/x%5D/package.json#L5", body)
+
+    def test_actions_annotation_reuses_outcome_without_raw_pr_text(self):
+        for status, level, message in (
+            ("clean", "notice", "Новых нарушений не найдено."),
+            ("violation", "warning", "Новых нарушений — 1."),
+            ("unsupported", "warning", "Проверка неполна."),
+            ("error", "error", "Проверка завершилась с ошибкой."),
+        ):
+            with self.subTest(status=status):
+                text = workflow_annotation(sample(status, reason="\n::untrusted content"))
+                self.assertEqual(text, f"::{level} title=Архитектурная проверка::{message}")
 
 
 class BasePolicyTests(unittest.TestCase):
