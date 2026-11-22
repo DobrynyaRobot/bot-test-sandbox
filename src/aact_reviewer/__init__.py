@@ -1,6 +1,7 @@
 """AACT 3.0.1 reviewer for direct Backstage package-manifest boundaries."""
 
 from fnmatch import fnmatchcase
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -300,6 +301,7 @@ def _review(*, repo, base_sha, head_sha, files, policy_path, fetch_blob):
 
     fetch_blob is a trusted immutable-data reader. No repository code is executed.
     """
+    policy_hash = None
     try:
         if not all(isinstance(x, str) and SHA.fullmatch(x) for x in (base_sha, head_sha)):
             raise ValueError('Expected immutable 40-character Git revision identifiers')
@@ -308,6 +310,10 @@ def _review(*, repo, base_sha, head_sha, files, policy_path, fetch_blob):
         policy = read_policy(policy_path)
         if repo.lower() not in {r.lower() for r in policy['repositories']}:
             raise CoverageGap('No formal policy is configured for this repository')
+        policy_digest = hashlib.sha256(json.dumps(policy, sort_keys=True).encode())
+        for artifact in ('project.mjs', 'rules.mjs', 'package-lock.json'):
+            policy_digest.update(hashlib.sha256((ENGINE / artifact).read_bytes()).digest())
+        policy_hash = policy_digest.hexdigest()
         phase_paths, renames = select_paths(files, policy['manifest_globs'])
         sources = pin_sources(policy, repo, base_sha, fetch_blob)
         inputs = project_inputs(policy, phase_paths, base_sha, head_sha, fetch_blob)
@@ -320,8 +326,14 @@ def _review(*, repo, base_sha, head_sha, files, policy_path, fetch_blob):
         uncertain_before = edge_index(phases['base']['possibleEdges'])
         gaps = [{'phase': side, **item} for side in ('base', 'head') for item in phases[side]['gaps']]
         findings = []
+        head_edges = []
+        revertible = []
+        base_gaps = {gap['file'] for gap in phases['base']['gaps']}
+        head_gaps = {gap['file'] for gap in phases['head']['gaps']}
         for item in new['data']['violations']:
             edge = finding_edge(item, phases['head']['model'])
+            key = [edge['ruleId'], edge['file'], edge['dependency']]
+            head_edges.append(key)
             if previous_edge(edge, before, renames):
                 continue
             if ambiguous := previous_edge(edge, uncertain_before, renames):
@@ -331,6 +343,10 @@ def _review(*, repo, base_sha, head_sha, files, policy_path, fetch_blob):
                     'source_package': edge['source'], 'dependency': edge['dependency'],
                 })
                 continue
+            same_path_key = (edge['file'], edge['dependency'], edge['ruleId'])
+            if (edge['file'] not in renames and edge['file'] not in base_gaps
+                    and same_path_key not in before['file']):
+                revertible.append(key)
             rule_id = item['ruleId']
             name, recommendation = RULES[rule_id]
             location = item['sourceLocation']
@@ -344,12 +360,25 @@ def _review(*, repo, base_sha, head_sha, files, policy_path, fetch_blob):
             'violation' if findings else 'unsupported' if gaps else 'clean',
             findings, coverage='partial' if gaps else 'complete_scoped',
             diagnostics=gaps, engine_version='3.0.1',
+            policy_hash=policy_hash,
+            coverage_counts={
+                'base_manifests': len(phase_paths['base']), 'head_manifests': len(phase_paths['head']),
+                'head_runtime_edges': sum(
+                    'runtime' in relation['tags'] for element in phases['head']['model']['elements'].values()
+                    for relation in element['relations']
+                ),
+            },
+            history_evidence={
+                'complete_paths': sorted(phase_paths['head'] - head_gaps),
+                'removed_paths': sorted(phase_paths['base'] - phase_paths['head'] - set(renames.values())),
+                'head_edges': head_edges, 'revertible': revertible,
+            } if len(head_edges) <= 5000 else {},
             base_violation_count=len(old['data']['violations']), head_violation_count=len(new['data']['violations']),
             base_exit_code=old['exitCode'], head_exit_code=new['exitCode'],
             duration_seconds=(old['meta']['durationMs'] + new['meta']['durationMs']) / 1000,
         )
     except CoverageGap as exc:
-        return result('unsupported', coverage='unsupported', diagnostics=[str(exc)])
+        return result('unsupported', coverage='unsupported', diagnostics=[str(exc)], policy_hash=policy_hash)
     except subprocess.TimeoutExpired:
         return result('error', coverage='unknown', diagnostics=['AACT processing timed out'])
     except (KeyError, OSError, ValueError, RuntimeError, TypeError) as exc:

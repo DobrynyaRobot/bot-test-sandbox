@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable
 
+from .evidence import HISTORY, history_marker, lifecycle, normalize_gaps, read_history
 from .github import GitHubClient, GitHubError, InputLimit, positive_id, repo_segment, revision_sha, url_path
 from .report import MARKER, line_in_patch, review_markdown
 
@@ -54,6 +55,7 @@ class PullRequestContext:
     head_sha: str
     effective_base_sha: str | None = None
     repository_id: int | None = None
+    base_ref: str | None = None
 
     @classmethod
     def from_event(cls, event: dict, repository: str):
@@ -63,7 +65,8 @@ class PullRequestContext:
         _checked_base_repository(pr, repository)
         if pr.get("number", number) != number:
             raise ValueError("event_pr_number_mismatch")
-        return cls(repository, number, revision_sha(pr["base"]["sha"]), revision_sha(pr["head"]["sha"]))
+        return cls(repository, number, revision_sha(pr["base"]["sha"]), revision_sha(pr["head"]["sha"]),
+                   repository_id=_base_repository_id(pr), base_ref=pr["base"].get("ref"))
 
     @property
     def review_base_sha(self) -> str:
@@ -92,6 +95,7 @@ def _current(api: GitHubClient, context: PullRequestContext) -> dict | None:
     if (
         pr.get("state") != "open"
         or pr["base"]["sha"] != context.base_sha
+        or (context.base_ref is not None and pr["base"].get("ref") != context.base_ref)
         or pr["head"]["sha"] != context.head_sha
     ):
         return None
@@ -128,12 +132,14 @@ def _review_result(value: dict) -> dict:
     elif diagnostics:
         codes.add("unclassified")
     return {
+        **{name: value[name] for name in ("policy_hash", "coverage_counts", "history_evidence") if name in value},
         "status": value["status"],
         "findings": findings,
         "reason": "reviewer_" + value["status"],
         "coverage": coverage if isinstance(coverage, str) and coverage in REVIEW_COVERAGE else "unknown",
         "scope_code": scope,
         "diagnostic_codes": sorted(codes),
+        "coverage_gaps": normalize_gaps(diagnostics, SOURCE_DIAGNOSTICS),
     }
 
 
@@ -151,7 +157,7 @@ def _comment_write(operation, *args):
 
 
 def _manage_comment(
-    api: GitHubClient, context: PullRequestContext, result: dict, run_id: int | None
+    api: GitHubClient, context: PullRequestContext, result: dict, run_id: int | None, changed_paths: set[str] | None
 ) -> tuple[str, int | None]:
     existing = []
     for comment in api.comments(context.repository, context.number, context.repository_id):
@@ -171,11 +177,30 @@ def _manage_comment(
     # GitHub doesn't offer a compare-and-swap endpoint for issue comments.
     if _current(api, context) is None:
         return "superseded", None
+    managed = min(existing, key=lambda comment: positive_id(comment["id"])) if existing else None
+    previous = read_history(managed["body"]) if managed else None
+    delta = lifecycle(result, previous, changed_paths)
+    if delta:
+        result["lifecycle"] = delta
+        result["confirmations"] = [
+            {"rule_id": rule, "file": path, "dependency": dependency}
+            for rule, path, dependency in delta["resolved"]
+        ]
+        result["unverified_previous"] = len(delta["unverified"])
+    elif previous:
+        result["unverified_previous"] = len(previous["active"])
+
     body = review_markdown(result, run_id=run_id, comment=True)
-    if not existing:
+    marker = history_marker(result)
+    if previous and not marker:
+        archived = HISTORY.search(managed["body"])
+        if archived:
+            marker = archived[0]
+    if marker:
+        body += "\n" + marker + "\n"
+    if not managed:
         comment_id = _comment_write(api.create_comment, context.repository, context.number, body)
         return "created", comment_id
-    managed = min(existing, key=lambda comment: positive_id(comment["id"]))
     comment_id = managed["id"]
     if managed["body"] == body:
         return "unchanged", comment_id
@@ -263,8 +288,12 @@ def process_event(
                 return api.fetch_blob(fork_name, path, commit)
         return blob
 
+    changed_paths = None
     try:
         files, patches = _files(api, context, live, max_files, max_patch_bytes)
+        changed_paths = {row["filename"] for row in files} | {
+            row["previous_filename"] for row in files if "previous_filename" in row
+        }
         effective = api.merge_base(context.repository, context.base_sha, context.head_sha, fork_name)
         context = replace(context, effective_base_sha=effective)
         identity["effective_base_sha"] = effective
@@ -315,11 +344,12 @@ def process_event(
             pass
         else:
             identity["head_repository"] = fork_name
+    result = {**identity, **result}
     try:
         if _current(api, context) is None:
             return {**identity, **result, "status": "superseded", "action": "none",
                     "review_status": result["status"], "delivery_status": "superseded"}
-        action, comment_id = _manage_comment(api, context, {**identity, **result}, run_id)
+        action, comment_id = _manage_comment(api, context, result, run_id, changed_paths)
         if action == "superseded":
             return {**identity, **result, "status": "superseded", "action": "none",
                     "review_status": result["status"], "delivery_status": "superseded"}

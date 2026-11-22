@@ -10,7 +10,7 @@ import re
 import time
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -223,6 +223,15 @@ class GitHubClient:
             raise GitHubError("github_unexpected_pr")
         return value
 
+    def open_pulls(self, repository: str, head: str, base: str) -> list[dict]:
+        query = urlencode({"state": "open", "head": head, "base": base, "per_page": 100})
+        value, link = self._request("GET", f"{repo_segment(repository)}/pulls?{query}")
+        if 'rel="next"' in link:
+            raise InputLimit("ambiguous_pr_list")
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            raise GitHubError("github_unexpected_array")
+        return value
+
     def files(self, repository: str, number: int, limit: int, repository_id: int | None = None) -> list[dict]:
         return self._paginate(repository, f"/pulls/{positive_id(number)}/files", limit, repository_id)
 
@@ -259,6 +268,28 @@ class GitHubClient:
 
     def edit_comment(self, repository: str, comment_id: int, body: str):
         self._request("PATCH", f"{repo_segment(repository)}/issues/comments/{positive_id(comment_id)}", {"body": body})
+
+    def checks(self, repository: str, sha: str, name: str) -> list[dict]:
+        query = urlencode({"check_name": name, "filter": "all", "per_page": 100})
+        value, link = self._request(
+            "GET", f"{repo_segment(repository)}/commits/{revision_sha(sha)}/check-runs?{query}"
+        )
+        if 'rel="next"' in link:
+            raise InputLimit("check_history_limit")
+        checks = value.get("check_runs") if isinstance(value, dict) else None
+        if not isinstance(checks, list) or not all(isinstance(item, dict) for item in checks):
+            raise GitHubError("github_invalid_checks")
+        return checks
+
+    def create_check(self, repository: str, sha: str, payload: dict):
+        value, _ = self._request(
+            "POST", f"{repo_segment(repository)}/check-runs", {**payload, "head_sha": revision_sha(sha)}
+        )
+        return value
+
+    def edit_check(self, repository: str, check_id: int, payload: dict):
+        value, _ = self._request("PATCH", f"{repo_segment(repository)}/check-runs/{positive_id(check_id)}", payload)
+        return value
 
     def _commit_tree(self, repository: str, commit: str) -> str | None:
         key = (repository.casefold(), commit)

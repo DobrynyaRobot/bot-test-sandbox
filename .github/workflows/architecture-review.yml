@@ -1,28 +1,31 @@
 name: Architecture review
-run-name: "Архитектурная проверка · PR № ${{ github.event.pull_request.number }}"
+run-name: "Архитектурная проверка · ${{ github.event.workflow_run.head_branch }}"
 
 on:
-  pull_request_target:
-    branches: [main]
-    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_run:
+    workflows: [Architecture review request]
+    types: [completed]
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
 
 concurrency:
-  group: architecture-review-${{ github.repository_id }}-${{ github.event.pull_request.number }}
+  group: architecture-review-${{ github.repository_id }}-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
   architecture-review:
-    if: github.event.pull_request.base.repo.full_name == github.repository
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
-      # The workflow revision is from the target branch. The PR base in the
-      # event can point to an earlier commit, even after the workflow changes.
+      # workflow_run uses the workflow on the default branch. Only that
+      # revision is executable. The signal transfers no files or verdicts.
       - name: Checkout trusted reviewer
+        id: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ github.repository }}
@@ -37,15 +40,18 @@ jobs:
           node-version: "22.22.0"
 
       - name: Install locked AACT
+        id: engine
         run: python3 src/aact_reviewer/install_engine.py
 
       - name: Review PR and write summary
         id: review
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ARCH_REVIEW_POLICY: ${{ vars.ARCH_REVIEW_POLICY || '.github/architecture-review.json' }}
+          ARCH_REVIEW_SETUP_FAILED: ${{ steps.engine.outcome != 'success' }}
           PYTHONPATH: src
-        run: python3 -B -m github_bot --verify-checkout
+        run: python3 -B -m github_bot --verify-checkout --workflow-run
 
       - name: Explain setup failure
         if: failure() && steps.review.outcome == 'skipped'
