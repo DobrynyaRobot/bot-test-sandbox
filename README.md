@@ -1,18 +1,22 @@
 # Архитектурное ревью pull request
 
-Здесь можно посмотреть, как бот находит нарушение архитектурного правила в обычном PR. Пример взят из Backstage. Плагину запрещено добавлять `@backstage/core-app-api` и `@backstage/frontend-app-api` в `dependencies`. Эти пакеты нужны самому приложению. Для тестов плагин может использовать их через `devDependencies`. [Текст правила](docs/architecture-policy.md)
+Бот проверяет, не добавил ли плагин App Core в рабочие зависимости. Плагин может использовать этот пакет для тестов через `devDependencies`. [Правило](docs/architecture-policy.md#frontend-app-core)
 
-## Посмотреть на примере
+## Куда нажать
 
-| Что поменяли | Что сделал бот |
+| Пример | Где смотреть |
 |---|---|
-| В [PR № 2](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/2/files) добавили `@backstage/core-app-api` в `dependencies` плагина. | Оставил [комментарий](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/2#issuecomment-7077172576) с файлом, строкой и ссылкой на правило. При следующем коммите обновил тот же комментарий. |
-| В [PR № 3](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/3/files) тот же пакет добавили в `devDependencies`. | [Проверка](https://github.com/DobrynyaRobot/bot-test-sandbox/actions/runs/45007725977) вернула `clean`. Комментариев нет. |
+| Плагин добавил `@backstage/core-app-api` в `dependencies`. | [Открыть замечание к PR № 2](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/2#issuecomment-7077172576). Нажмите на имя файла, чтобы перейти к строке. Под ней есть исправление, ссылка на правило и ссылка на точный коммит. |
+| Пакет добавили только в `devDependencies`. | [Посмотреть изменения в PR № 3](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/3/files). Итог проверки ищите по номеру PR в [Actions → Architecture review](https://github.com/DobrynyaRobot/bot-test-sandbox/actions/workflows/architecture-review.yml). |
 
-Чтобы повторить, создайте ветку от `main`, добавьте один из этих пакетов в раздел `dependencies` файла [plugins/demo/package.json](plugins/demo/package.json) и откройте PR в `main`. Ожидайте одно замечание. В GitHub Actions откройте **Architecture review** и шаг **Review immutable PR data**. Поле `status` показывает результат, а `findings_count` — число находок. Зелёная галочка означает, что проверка выполнилась. PR с нарушением тоже может получить зелёную галочку.
+Откройте **Summary** выбранного запуска. Там сразу видны итог проверки, замечания со ссылками или причина, по которой проверка не завершилась. Зелёная галочка в Actions означает, что проверка выполнилась. О наличии нарушений говорит текст в Summary.
+
+На новых коммитах бот обновляет один комментарий. Если вы исправили нарушение, в нём появится новый результат. В PR, где замечаний ещё не было, чистый результат можно посмотреть в Actions.
+
+Чтобы попробовать на своём PR, добавьте `@backstage/core-app-api` в `dependencies` файла [plugins/demo/package.json](plugins/demo/package.json) и откройте PR в `main`. Бот укажет добавленную строку.
 
 ## Что сравниваем в проекте
 
 В исследовании сравниваем три способа ревью одного и того же PR. Агент читает изменение и архитектурные решения. AACT проверяет запрограммированные правила. В третьем варианте агент получает ещё и результат AACT. Сравниваем замечания с разметкой по исходникам и документам. Считаем найденные нарушения, пропуски и ложные замечания. Повторы показывают, насколько устойчив ответ.
 
-В этой песочнице работает вариант с AACT 3.0.1. Он сравнивает прямые зависимости с базовой ревизией PR. Проверка охватывает изменённые манифесты по шаблонам `plugins/**/package.json` и `packages/**/package.json`. Результат `clean` относится только к этому правилу. [Настройка](.github/architecture-review.json) · [Workflow](.github/workflows/architecture-review.yml) · [Статья об архитектурных тестах](https://habr.com/ru/articles/800205/)
+В этой песочнице работает AACT 3.0.1. Он сравнивает прямые зависимости в изменённых `plugins/**/package.json` и `packages/**/package.json` с базовой ревизией PR. [Настройка](.github/architecture-review.json) · [Workflow](.github/workflows/architecture-review.yml) · [Статья об архитектурных тестах](https://habr.com/ru/articles/800205/)

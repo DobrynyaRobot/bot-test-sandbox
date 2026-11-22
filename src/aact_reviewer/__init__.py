@@ -338,6 +338,7 @@ def _review(*, repo, base_sha, head_sha, files, policy_path, fetch_blob):
                 'rule_id': rule_id, 'rule': name, 'file': location['file'],
                 'line': location['start']['line'], 'problem': item['message'],
                 'recommendation': recommendation, 'source': sources[rule_id], 'target': item['target'],
+                'dependency': edge['dependency'],
             })
         return result(
             'violation' if findings else 'unsupported' if gaps else 'clean',

@@ -249,8 +249,13 @@ class GitHubClient:
     def comments(self, repository: str, number: int, repository_id: int | None = None) -> list[dict]:
         return self._paginate(repository, f"/issues/{positive_id(number)}/comments", 3000, repository_id)
 
-    def create_comment(self, repository: str, number: int, body: str):
-        self._request("POST", f"{repo_segment(repository)}/issues/{positive_id(number)}/comments", {"body": body})
+    def create_comment(self, repository: str, number: int, body: str) -> int | None:
+        value, _ = self._request("POST", f"{repo_segment(repository)}/issues/{positive_id(number)}/comments", {"body": body})
+        try:
+            return positive_id(value.get("id")) if isinstance(value, dict) else None
+        except ValueError:
+            # A successful write without a usable ID still produced a comment.
+            return None
 
     def edit_comment(self, repository: str, comment_id: int, body: str):
         self._request("PATCH", f"{repo_segment(repository)}/issues/comments/{positive_id(comment_id)}", {"body": body})

@@ -1,4 +1,5 @@
 name: Architecture review
+run-name: "Архитектурная проверка · PR № ${{ github.event.pull_request.number }}"
 
 on:
   pull_request_target:
@@ -38,9 +39,17 @@ jobs:
       - name: Install locked AACT
         run: python3 src/aact_reviewer/install_engine.py
 
-      - name: Review immutable PR data
+      - name: Review PR and write summary
+        id: review
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ARCH_REVIEW_POLICY: ${{ vars.ARCH_REVIEW_POLICY || '.github/architecture-review.json' }}
           PYTHONPATH: src
         run: python3 -B -m github_bot --verify-checkout
+
+      - name: Explain setup failure
+        if: failure() && steps.review.outcome == 'skipped'
+        run: |
+          printf '%s\n' '### Архитектурная проверка · ошибка подготовки' '' \
+            'Проверка зависимостей не началась. Откройте этап с ошибкой и повторите запуск после исправления.' \
+            >> "$GITHUB_STEP_SUMMARY"

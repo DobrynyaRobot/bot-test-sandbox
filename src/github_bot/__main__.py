@@ -1,4 +1,4 @@
-"""Read the GitHub Actions event and log a sanitized, structured decision."""
+"""Review the PR event and write a structured receipt and an Actions summary."""
 
 import argparse
 import json
@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 from . import GitHubClient, PullRequestContext, process_event
+from .github import positive_id
+from .report import review_markdown
 
 MAX_EVENT_BYTES = 1_048_576
 
@@ -33,6 +35,20 @@ def _verify_checkout(path: Path, sha: str) -> None:
         raise ValueError("checkout_revision_mismatch")
 
 
+def _write_summary(result: dict, context: PullRequestContext | None) -> None:
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    if context:
+        result = {"repository": context.repository, "number": context.number,
+                  "head_sha": context.head_sha, **result}
+    try:
+        with Path(summary).open("a", encoding="utf-8") as file:
+            file.write(review_markdown(result))
+    except OSError:
+        print("Could not write the GitHub Actions summary.", file=sys.stderr)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
@@ -45,6 +61,11 @@ def main(argv=None) -> int:
     # including Git and the formal reviewer do not inherit this token.
     token = os.environ.pop("GITHUB_TOKEN", "")
     try:
+        run_id = positive_id(int(os.environ.get("GITHUB_RUN_ID", "")))
+    except ValueError:
+        run_id = None
+    context = None
+    try:
         if not args.repository or not args.event:
             raise ValueError("missing_github_context")
         event = _event(args.event)
@@ -55,13 +76,14 @@ def main(argv=None) -> int:
             raise ValueError("policy_outside_checkout")
         if args.verify_checkout:
             _verify_checkout(checkout, context.base_sha)
-        result = process_event(GitHubClient(token, base_url=args.api_url), event, args.repository, policy)
+        result = process_event(GitHubClient(token, base_url=args.api_url), event, args.repository, policy, run_id=run_id)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
         result = {"status": "error", "action": "none", "findings": [], "reason": "invalid_checkout_or_github_context"}
 
+    _write_summary(result, context)
     allowed = {"repository", "number", "base_sha", "head_sha", "effective_base_sha", "status",
                "action", "reason", "review_status", "delivery_status", "coverage", "scope_code",
-               "diagnostic_codes"}
+               "diagnostic_codes", "comment_id"}
     receipt = {k: v for k, v in result.items() if k in allowed}
     receipt["findings_count"] = len(result.get("findings", []))
     print(json.dumps(receipt, sort_keys=True), flush=True)
