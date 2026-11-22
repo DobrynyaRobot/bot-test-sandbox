@@ -7,9 +7,9 @@
 | Пример | Где смотреть |
 |---|---|
 | Плагин добавил `@backstage/core-app-api` в `dependencies`. | [Открыть замечание к PR № 2](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/2#issuecomment-7077172576). Нажмите на имя файла, чтобы перейти к строке. Под ней есть исправление, ссылка на правило и ссылка на точный коммит. |
-| Пакет добавили только в `devDependencies`. | [Посмотреть изменения в PR № 3](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/3/files). Итог проверки ищите по номеру PR в [Actions → Architecture review](https://github.com/DobrynyaRobot/bot-test-sandbox/actions/workflows/architecture-review.yml). |
+| Пакет добавили только в `devDependencies`. | [Посмотреть изменения в PR № 3](https://github.com/DobrynyaRobot/bot-test-sandbox/pull/3/files). [Открыть чистый результат в Actions](https://github.com/DobrynyaRobot/bot-test-sandbox/actions/runs/45015668745). |
 
-Откройте **Summary** выбранного запуска. Там сразу видны итог проверки, замечания со ссылками или причина, по которой проверка не завершилась. Зелёная галочка в Actions означает, что проверка выполнилась. О наличии нарушений говорит текст в Summary.
+Для любого PR откройте [Actions → Architecture review](https://github.com/DobrynyaRobot/bot-test-sandbox/actions/workflows/architecture-review.yml) и выберите запуск по номеру PR. Короткий итог виден на странице **Summary** в блоке **Annotations**. Зелёная галочка показывает, что проверка выполнилась. О нарушениях говорит итог проверки.
 
 На новых коммитах бот обновляет один комментарий. Если вы исправили нарушение, в нём появится новый результат. В PR, где замечаний ещё не было, чистый результат можно посмотреть в Actions.
 
